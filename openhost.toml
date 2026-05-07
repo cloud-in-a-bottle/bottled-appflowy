@@ -35,9 +35,23 @@ health_check = "/_healthz"
 #     AppFlowy desktop / mobile clients without bouncing through
 #     SSO.  The presigned URL itself acts as the auth token.
 public_paths = [
+    # GoTrue's OAuth callback hop after the OIDC dance.  The
+    # browser arrives without zone_auth (the OpenHost router only
+    # stamps owner headers on top-level navigations to the bare
+    # zone, and this is a redirect from the OIDC provider with a
+    # different referer chain).  GoTrue's own state validation
+    # gates it, so anonymous reachability is fine.
     "/gotrue/callback",
+    # OIDC discovery / JWKS / token / userinfo endpoints are
+    # public-safe by OIDC spec — the bridge enforces owner-only
+    # on /authorize specifically.  Listing the whole prefix as
+    # public DOES still let unauthenticated callers hit /authorize,
+    # but the bridge will 302 them to the zone /login.
     "/_oidc/",
     "/realms/openhost/",
+    # MinIO presigned URLs (signed against the internal host) need
+    # to be reachable directly by AppFlowy desktop / mobile clients
+    # without zone_auth.  The presigned URL itself is the auth.
     "/minio-api/",
 ]
 

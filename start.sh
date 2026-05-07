@@ -64,6 +64,51 @@ chown postgres:postgres "$PG_LOG_DIR"
 chmod 0750 "$PG_LOG_DIR"
 
 # -----------------------------------------------------------------
+# Loopback-public-URL bridge
+#
+# GoTrue's keycloak provider hardcodes a single base URL for ALL
+# of {auth, token, userinfo} endpoints — it doesn't separate the
+# browser-facing URL from the server-facing one.  The browser must
+# reach the public hostname (`appflowy.<zone>`) for the auth
+# endpoint, but server-to-server token/userinfo calls from inside
+# the container can't reach the public IP (NAT-loopback / cloud
+# firewall blocks the container from talking to its own external
+# address).
+#
+# Workaround: make the public hostname resolve to 127.0.0.1
+# inside this container via /etc/hosts, run a second nginx
+# listener on :443 with a self-signed cert, and add that cert to
+# Go's trusted-CA bundle so GoTrue's HTTPS calls succeed.  The
+# browser is unaffected — it still sees the OpenHost outer Caddy's
+# Let's Encrypt cert because it never enters this container at all
+# for the TLS leg.
+# -----------------------------------------------------------------
+if ! grep -q "$APP_HOST" /etc/hosts; then
+    echo "127.0.0.1 $APP_HOST" >> /etc/hosts
+fi
+
+CERT_DIR="$PERSIST/internal-tls"
+mkdir -p "$CERT_DIR"
+if [[ ! -f "$CERT_DIR/cert.pem" ]]; then
+    echo "[start.sh] Generating internal self-signed TLS cert for $APP_HOST"
+    # SAN includes the public hostname so GoTrue's TLS handshake
+    # passes hostname verification.
+    openssl req -x509 -newkey rsa:2048 -nodes -days 36500 \
+        -keyout "$CERT_DIR/key.pem" \
+        -out "$CERT_DIR/cert.pem" \
+        -subj "/CN=$APP_HOST" \
+        -addext "subjectAltName=DNS:$APP_HOST,DNS:localhost,IP:127.0.0.1" \
+        2>/dev/null
+    chmod 0600 "$CERT_DIR/key.pem"
+fi
+
+# Trust the self-signed cert inside this container so Go's
+# crypto/x509 default verifier accepts it.  /etc/ssl/certs is
+# already on Go's default search path on Debian/Ubuntu.
+cp "$CERT_DIR/cert.pem" /usr/local/share/ca-certificates/openhost-appflowy-internal.crt
+update-ca-certificates >/dev/null 2>&1 || true
+
+# -----------------------------------------------------------------
 # Secret generation
 # -----------------------------------------------------------------
 

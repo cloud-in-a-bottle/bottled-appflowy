@@ -82,6 +82,7 @@ RUN apt-get update -qq \
         curl \
         gnupg \
         nginx \
+        openssl \
         redis-server \
         python3 \
         python3-starlette \
