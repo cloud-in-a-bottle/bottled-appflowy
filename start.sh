@@ -109,6 +109,25 @@ cp "$CERT_DIR/cert.pem" /usr/local/share/ca-certificates/openhost-appflowy-inter
 update-ca-certificates >/dev/null 2>&1 || true
 
 # -----------------------------------------------------------------
+# Inject APP_CONFIG into the AppFlowy-Web SPA's index.html
+#
+# The upstream docker-entrypoint.sh sed-rewrites index.html on
+# every container start to inject the runtime config that the SPA
+# reads from window.__APP_CONFIG__.  We've already discarded that
+# entrypoint by copying just the static bundle, so we replicate
+# the rewrite here.  The replacement is idempotent (we delete any
+# previous injection first via grep -v).
+# -----------------------------------------------------------------
+INDEX_HTML=/opt/appflowy-web/html/index.html
+INDEX_BACKUP=/opt/appflowy-web/html/index.html.orig
+if [[ ! -f "$INDEX_BACKUP" ]]; then
+    cp "$INDEX_HTML" "$INDEX_BACKUP"
+fi
+CONFIG_SCRIPT="<script>window.__APP_CONFIG__={APPFLOWY_BASE_URL:'${APP_BASE_URL}',APPFLOWY_GOTRUE_BASE_URL:'${APP_BASE_URL}/gotrue',APPFLOWY_WS_BASE_URL:'${APP_WS_URL}'};</script>"
+# Re-render from the original each boot so URL changes propagate.
+sed "s|</head>|${CONFIG_SCRIPT}</head>|" "$INDEX_BACKUP" > "$INDEX_HTML"
+
+# -----------------------------------------------------------------
 # Secret generation
 # -----------------------------------------------------------------
 
