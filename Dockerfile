@@ -1,82 +1,152 @@
-# Placeholder image for openhost-appflowy.
+# AppFlowy Cloud + GoTrue + Postgres-pgvector + Redis + MinIO + an
+# OIDC-bridge sidecar packaged as a single OpenHost-deployable container.
 #
-# AppFlowy Cloud is a 7+ service stack: postgres, gotrue (Supabase
-# auth), appflowy-cloud, appflowy-history, appflowy-worker, nginx,
-# minio (S3-compatible blob store), and redis.  Bundling all of
-# them into a single OpenHost container is non-trivial:
+# Topology:
 #
-#   * GoTrue's OIDC client config has to be wired through env vars
-#     AND the postgres-stored auth schema, so a Pattern D OIDC
-#     bridge needs both an HTTP shim and a SQL bootstrap step.
-#   * Minio needs to be reachable over loopback under a stable URL
-#     for appflowy-cloud's signed-URL generation.
-#   * appflowy-cloud expects a specific Postgres migration history
-#     populated by its own migration runner; a clean first-boot
-#     flow would need ~5 minutes of orchestration work alone.
+#   browser → OpenHost router (subdomain appflowy.<zone>; verifies
+#                              owner zone_auth, stamps
+#                              X-OpenHost-Is-Owner)
+#          → container :8080  (nginx)
+#                ├─ /_oidc/*          → oidc_bridge.py on :7000
+#                ├─ /realms/openhost/* → oidc_bridge.py (Keycloak-shape paths)
+#                ├─ /sso-bounce       → sso_bounce.py on :7100
+#                ├─ /gotrue/*         → gotrue on :9999
+#                ├─ /api/*            → appflowy_cloud on :8000
+#                ├─ /ws*              → appflowy_cloud on :8000 (WebSocket)
+#                ├─ /minio-api/*      → minio API on :9000
+#                ├─ /minio/*          → minio console on :9001
+#                ├─ static assets     → /opt/appflowy-web/html
+#                └─ /                 → bouncer (owner+no-jwt) | static SPA
 #
-# Until the upstream maintainers publish a single-image variant or
-# until we have time for a full Pattern D + nginx-routed multi-
-# service container, this image serves a static placeholder page.
-# Replace this Dockerfile with a real implementation modelled on
-# openhost-lemmy (which similarly bundles postgres + redis + nginx
-# + an OIDC bridge in one container) when the work can be scheduled.
+# Internal services launched by start.sh (no s6 / supervisord — bash
+# `wait -n` like openhost-lemmy):
+#
+#   * postgres (16 + pgvector) — bundled DB.
+#   * redis (apt) — appflowy_cloud cache + worker queue.
+#   * minio (binary download) — S3-compatible blob store.
+#   * gotrue — copied from upstream alpine image (Go static binary,
+#     runs on glibc with no fuss).
+#   * appflowy_cloud — copied from upstream Ubuntu 24.04 image
+#     (dynamically linked, so we pin our base to noble for libssl
+#     compatibility).
+#   * oidc_bridge — Python Starlette OIDC provider, Keycloak-shape
+#     URLs so GoTrue's external_keycloak_* settings can talk to it.
+#   * sso_bounce — owner SSO redirect helper.
+#   * nginx — front-door router on :8080.
+#
+# Static AppFlowy-Web SPA assets are copied from
+# appflowyinc/appflowy_web:latest's /usr/share/nginx/html and served
+# directly by our nginx.  Bun-based SSR routes are NOT replicated;
+# `/app/*` routes still work via client-side routing on the SPA.
 
-FROM docker.io/library/alpine:3.20
+# Stage 1: appflowy_cloud (binary + libs from upstream Ubuntu 24.04 image).
+FROM appflowyinc/appflowy_cloud:latest AS appflowy-cloud-source
 
-RUN apk add --no-cache \
-        busybox-extras \
+# Stage 2: gotrue (Go static binary from upstream Alpine image; runs
+# fine on glibc since CGO_ENABLED=0).  We grab the migrations dir
+# from this image too — the binary applies them on `auth migrate`.
+FROM appflowyinc/gotrue:latest AS gotrue-source
+
+# Stage 3: AppFlowy-Web static assets.  We discard the Bun runtime
+# and only keep the pre-built SPA bundle from /usr/share/nginx/html
+# — the SPA does its own routing client-side, so the Bun SSR layer
+# is optional for our purposes.
+FROM appflowyinc/appflowy_web:latest AS appflowy-web-source
+
+# Stage 4: final image.  Ubuntu 24.04 noble matches the upstream
+# appflowy_cloud build environment so the dynamically-linked
+# appflowy_cloud binary (libssl/libcrypto/libbz2/libm) finds matching
+# library versions.
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# System deps.  Notes:
+#   * postgresql-16 + postgresql-16-pgvector: AppFlowy Cloud requires
+#     pgvector for AI embeddings columns even when AI features are
+#     disabled, because the schema migrations always run and reference
+#     the vector extension.
+#   * redis-server: cache + worker queue.
+#   * nginx: front-door router.
+#   * python3 + python3-jwt + python3-cryptography + python3-starlette
+#     + python3-uvicorn: OIDC bridge.  Apt names match the lemmy
+#     image so we don't have to pip-install in the build.
+#   * curl, ca-certificates, tini, gosu, procps: lifecycle / readiness
+#     plumbing.
+#   * libssl3, libcrypto, libbz2: appflowy_cloud's runtime deps —
+#     should already be in noble's base.  Listed explicitly so a
+#     future base image swap doesn't silently break.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        nginx \
+        redis-server \
+        python3 \
+        python3-starlette \
+        python3-jwt \
+        python3-cryptography \
+        python3-uvicorn \
         tini \
- && mkdir -p /var/www \
- && cat > /var/www/index.html <<'HTML'
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>OpenHost AppFlowy — placeholder</title>
-  <style>
-    body { font-family: -apple-system, system-ui, sans-serif;
-           max-width:48em; margin:3em auto; padding:0 1em;
-           color:#222; line-height:1.5; }
-    h1 { color:#3b82f6; }
-    code { background:#f4f4f4; padding:0.1em 0.3em;
-           border-radius:3px; }
-    .note { background:#fef3c7; border-left:4px solid #f59e0b;
-            padding:1em; margin:1.5em 0; }
-  </style>
-</head>
-<body>
-  <h1>AppFlowy: not yet shipped</h1>
-  <div class="note">
-    <strong>This is a placeholder.</strong>  The
-    <code>openhost-appflowy</code> repo currently ships a static
-    "coming soon" page.
-  </div>
-  <p>
-    AppFlowy Cloud is a multi-service deployment requiring
-    PostgreSQL, GoTrue (Supabase's auth service), the AppFlowy
-    backend, AppFlowy History, AppFlowy Worker, MinIO (S3-
-    compatible blob store), Redis, and an Nginx routing layer.
-    Bundling those into a single OpenHost container is non-trivial
-    and requires careful first-boot orchestration of GoTrue's
-    OIDC client config (so the OpenHost zone owner can sign in
-    via Pattern D) plus the AppFlowy Cloud migration runner.
-  </p>
-  <p>
-    See the repo <a
-    href="https://github.com/imbue-openhost/openhost-appflowy">
-    README</a> for the design notes on how a full implementation
-    would be wired together — modelled on
-    <a href="https://github.com/imbue-openhost/openhost-lemmy">
-    openhost-lemmy</a> which similarly bundles Postgres + Redis +
-    Nginx + an OIDC bridge in one container.
-  </p>
-  <p>
-    Tracker: pull requests welcome.
-  </p>
-</body>
-</html>
-HTML
+        gosu \
+        procps \
+        libssl3 \
+        libbz2-1.0 \
+ && rm -rf /var/lib/apt/lists/* \
+ && rm -f /etc/nginx/sites-enabled/default
 
-# busybox httpd serves /var/www on the configured port.
+# PostgreSQL 16 + pgvector from pgdg.  Ubuntu 24.04's universe ships
+# postgresql-16 directly, but for pgvector we need pgdg (the
+# postgresql-16-pgvector package isn't in main).  Install both from
+# pgdg so the versions match.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
+ && echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+        postgresql-16 \
+        postgresql-client-16 \
+        postgresql-16-pgvector \
+ && rm -rf /var/lib/apt/lists/*
+
+# MinIO server binary.  Pin to a recent stable release; minio's
+# upstream binary is statically-linked Go, runs fine on Ubuntu.
+# 2025-04-22 release is the current LTS line.
+RUN curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-04-22T22-12-26Z \
+        -o /usr/local/bin/minio \
+ && chmod +x /usr/local/bin/minio
+
+# Copy gotrue from the upstream Alpine image.  Despite living on a
+# musl-libc filesystem, the binary itself was built CGO_ENABLED=0
+# and runs unchanged on glibc.  We also copy /migrations because
+# `auth migrate` reads them at runtime.
+COPY --from=gotrue-source /auth /usr/local/bin/gotrue
+COPY --from=gotrue-source /migrations /opt/openhost-appflowy/gotrue-migrations
+
+# Copy appflowy_cloud binary from the upstream noble image.
+COPY --from=appflowy-cloud-source /usr/local/bin/appflowy_cloud /usr/local/bin/appflowy_cloud
+
+# Copy the AppFlowy-Web static SPA bundle.  We serve this from
+# nginx without the Bun-based SSR layer; the SPA does its own
+# client-side routing for /app/<workspace>/<doc> URLs, so SEO is
+# the only thing we lose, and a single-tenant zone owner doesn't
+# need SEO.
+COPY --from=appflowy-web-source /usr/share/nginx/html /opt/appflowy-web/html
+
+# Create the appflowy unprivileged user.  UID 1500 to avoid clashing
+# with default _apt/messagebus etc. system users (matches
+# openhost-lemmy convention).
+RUN useradd --system --uid 1500 --user-group --no-create-home --shell /usr/sbin/nologin appflowy
+
+# Application files.
+COPY nginx.conf       /etc/nginx/nginx.conf
+COPY oidc_bridge.py   /opt/openhost-appflowy/oidc_bridge.py
+COPY sso_bounce.py    /opt/openhost-appflowy/sso_bounce.py
+COPY bootstrap.py     /opt/openhost-appflowy/bootstrap.py
+COPY start.sh         /opt/openhost-appflowy/start.sh
+
 EXPOSE 8080
-ENTRYPOINT ["/sbin/tini", "--", "/usr/sbin/httpd", "-f", "-p", "0.0.0.0:8080", "-h", "/var/www"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/openhost-appflowy/start.sh"]

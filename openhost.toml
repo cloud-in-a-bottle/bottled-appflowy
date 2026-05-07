@@ -1,7 +1,7 @@
 [app]
 name = "appflowy"
-version = "0.1.0"
-description = "Placeholder for AppFlowy Cloud (Notion-alternative collaborative workspace).  Full deployment requires postgres + gotrue + appflowy-cloud + appflowy-history + appflowy-worker + nginx + minio (S3-compatible blob store) + redis — too complex to ship in a single OpenHost container in this iteration.  This placeholder serves a static page explaining the situation."
+version = "0.2.0"
+description = "AppFlowy Cloud (Notion-alternative collaborative workspace) — bundles postgres+pgvector, redis, gotrue, appflowy_cloud, minio, OIDC bridge, and nginx in a single OpenHost container.  AI features and the Bun-based SSR layer are intentionally omitted in this build; the SPA loads via static files served by nginx."
 authors = ["Andrew Laack <andrew@laack.co>"]
 
 [runtime.container]
@@ -9,14 +9,60 @@ image = "Dockerfile"
 port = 8080
 
 [routing]
-# Busybox httpd serves /var/www; a GET / returns the placeholder
-# HTML with status 200, which OpenHost's healthcheck accepts.
-health_check = "/"
+# /_healthz is a static 200 from nginx — bypasses the upstream
+# services so the container reports ready as soon as nginx is up.
+health_check = "/_healthz"
+
+# Public paths the OpenHost router lets through without zone_auth:
+#   * /gotrue/callback — GoTrue's OAuth callback hop after the
+#     OIDC dance.  Browser arrives without any zone_auth cookie
+#     because the OIDC provider's host (appflowy.<zone>) is the
+#     same as where we land, but the cookie path is the *zone*'s
+#     /login domain.  The owner's zone_auth was set on the bare
+#     zone before /sso-bounce; by the time we 302 back to here,
+#     the cookie is fine — but zone_auth's path scoping makes it
+#     unreliable.  Listing /gotrue/callback as a public path lets
+#     the dance complete; the inner GoTrue session JWT is what
+#     authenticates the SPA after this hop.
+#   * /realms/openhost/* — Keycloak-shape OIDC paths the bridge
+#     serves.  The bridge enforces owner-only on /authorize via
+#     the X-OpenHost-Is-Owner header itself; everything else
+#     (jwks, discovery, token, userinfo) is anonymous-safe.
+#   * /_oidc/* — flat OIDC paths (debugging convenience; same
+#     security model as /realms/).
+#   * /minio-api/* — required so that MinIO presigned URLs (signed
+#     against the internal host) can be fetched directly by the
+#     AppFlowy desktop / mobile clients without bouncing through
+#     SSO.  The presigned URL itself acts as the auth token.
+public_paths = [
+    "/gotrue/callback",
+    "/_oidc/",
+    "/realms/openhost/",
+    "/minio-api/",
+]
 
 [resources]
-memory_mb = 64
-cpu_millicores = 100
+# AppFlowy Cloud is a moderately heavy stack:
+#   * postgres-16: ~150 MB resident.
+#   * appflowy_cloud (Rust binary, lots of async runtime): ~250 MB.
+#   * gotrue: ~30 MB.
+#   * minio: ~80 MB.
+#   * redis: ~20 MB.
+#   * nginx + python OIDC bridges: <50 MB combined.
+# 1.5 GiB / 1.5 vCPU is comfortable for a single-tenant deployment
+# with a few dozen documents.
+memory_mb = 1536
+cpu_millicores = 1500
 
 [data]
-app_data = false
-app_temp_data = false
+# Persistent state under /data/app_data/appflowy/:
+#   * postgres/   — DB cluster (largest)
+#   * minio/      — uploaded blobs
+#   * redis/      — empty (we run with save="" + appendonly=no, so
+#                   restarts wipe the cache; this is fine for an
+#                   appflowy_cloud cache-only role)
+#   * oidc/       — RSA signing key for the OIDC bridge
+#   * log/        — child-process stdout/stderr
+#   * *.txt       — generated secrets (postgres, gotrue, minio, oidc)
+app_data = true
+app_temp_data = true

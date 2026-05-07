@@ -1,88 +1,136 @@
 # openhost-appflowy
 
-Placeholder — AppFlowy Cloud is not yet shipped on OpenHost.
+[AppFlowy Cloud](https://github.com/AppFlowy-IO/AppFlowy-Cloud) — a
+Notion-alternative collaborative workspace — packaged as an OpenHost
+app, accessed via SSO with no application-level auth on the public
+SPA.
 
-## Why a placeholder?
+## What you get
 
-AppFlowy Cloud is a multi-service stack:
+- AppFlowy running on `https://appflowy.<zone>/` with TLS terminated
+  by the OpenHost outer Caddy.
+- Only the zone owner can reach the SPA; the OpenHost router gates
+  access on zone JWTs and the OIDC bridge enforces "owner only" by
+  rejecting any /authorize request without `X-OpenHost-Is-Owner`.
+- The AppFlowy desktop / mobile native apps can connect to
+  `https://appflowy.<zone>` as their server URL after first signing
+  in via the web (so the GoTrue session has been minted).
+- Persistent state under `/data/app_data/appflowy/`:
+  - `postgres/` — DB cluster (AppFlowy + GoTrue's `auth` schema)
+  - `minio/` — uploaded document attachments
+  - `oidc/` — RSA signing key for the OIDC bridge
+  - `redis/` — cache (transient; wiped on restart)
+  - `log/` — child-process stdout/stderr
+  - `*.txt` — generated secrets
 
-  * **PostgreSQL** — primary metadata DB.
-  * **GoTrue** — Supabase's auth service.  Handles user sessions,
-    OAuth/OIDC providers, JWT minting.  Configured via env vars
-    AND a postgres-stored auth schema.
-  * **appflowy-cloud** — main API server.  Reads the GoTrue JWT
-    from the `Authorization` header on every request.
-  * **appflowy-history** — version-history service.
-  * **appflowy-worker** — background-job runner (notifications,
-    indexing).
-  * **MinIO** — S3-compatible blob store for document attachments.
-    `appflowy-cloud` mints signed URLs against MinIO for blob
-    uploads/downloads.
-  * **Redis** — caching + ephemeral state.
-  * **Nginx** — request routing layer in front of the above.
+## Architecture
 
-Bundling all of this into a single OpenHost container is feasible
-but non-trivial:
+```
+browser
+   │
+   ▼
+OpenHost outer Caddy (TLS)
+   │
+   ▼
+OpenHost router (stamps X-OpenHost-Is-Owner: true on owner JWTs)
+   │
+   ▼
+container :8080  (nginx)
+       ├─ /_oidc/*           → oidc_bridge (Python on :7000)
+       ├─ /realms/openhost/* → oidc_bridge (Keycloak-shape paths,
+       │                       what GoTrue's external_keycloak fetcher
+       │                       talks to)
+       ├─ /sso-bounce        → sso_bounce (Python on :7100)
+       ├─ /gotrue/*          → gotrue (Go static binary on :9999)
+       ├─ /api/*             → appflowy_cloud (Rust binary on :8000)
+       ├─ /ws*               → appflowy_cloud (WebSocket)
+       ├─ /minio-api/*       → MinIO API (:9000)  -- presigned URL traffic
+       ├─ /minio/*           → MinIO console (:9001) -- admin UI
+       └─ /                  → AppFlowy-Web SPA bundle
+                              (copied from upstream image's
+                              /usr/share/nginx/html, served as
+                              static files; bouncer redirects
+                              owners through SSO on first hit)
+```
 
-  * GoTrue's OIDC client config has to be wired through env vars
-    **AND** the postgres-stored auth schema.  A Pattern D OIDC
-    bridge would need both an HTTP shim (like
-    `openhost-immich`'s `oidc-bridge/server.py`) and a SQL bootstrap
-    step that registers the OpenHost OIDC client in
-    `auth.providers`.
-  * MinIO needs to be reachable over loopback under a stable URL
-    for `appflowy-cloud`'s signed-URL generation.  S3 client
-    libraries embedded in `appflowy-cloud` use the URL it was
-    handed by `appflowy-cloud`'s config; getting that URL to also
-    be reachable from the browser (for client-side blob uploads)
-    requires either an `appflowy-cloud` config patch or a
-    transparent nginx routing layer.
-  * `appflowy-cloud` expects a specific Postgres migration history
-    populated by its own migration runner; a clean first-boot
-    flow would need ~5 minutes of orchestration work alone.
+Internal services (started by `start.sh`, supervised via bash
+`wait -n`):
 
-## What this repo ships
+| Process          | Port  | Purpose                                       |
+| ---------------- | ----- | --------------------------------------------- |
+| postgres-16      | 5432  | metadata DB + GoTrue's `auth` schema          |
+| redis            | 6379  | appflowy_cloud cache + worker queue           |
+| minio            | 9000/9001 | S3-compatible blob store                  |
+| gotrue           | 9999  | Supabase auth — issues GoTrue JWTs            |
+| appflowy_cloud   | 8000  | main API, document collab, WebSocket          |
+| oidc_bridge      | 7000  | OIDC IdP (Keycloak-shape) backed by zone auth |
+| sso_bounce       | 7100  | redirect helper for owner first-hit flow      |
+| nginx            | 8080  | front-door router                             |
 
-A tiny Alpine image running busybox `httpd` serving a static
-"coming soon" page on port 8080 so the OpenHost slot is reserved
-and `appflowy.<zone>` doesn't 404 outright.
+## What's intentionally omitted
 
-## A full implementation would …
+- **`appflowy_ai`** (semantic search, GPT summaries) — needs an
+  OpenAI API key.  Set `AI_ENABLED=true` and supply
+  `AI_OPENAI_API_KEY` if you want it back; you'll also need to add
+  the AI service binary to the Dockerfile.
+- **`appflowy_search`** (Tantivy keyword search) — adds a 4th Rust
+  process.  AppFlowy works without it; full-text search won't.
+- **`appflowy_worker`** (background jobs: import/export, mailers) —
+  imports from Notion / Markdown won't work.  Add this back if you
+  ever need bulk import.
+- **`appflowy_web`** Bun-based SSR layer — replaced with the
+  pre-built static SPA bundle from the same image.  SEO-friendly
+  published-page rendering is gone, but for a single-tenant
+  workspace nobody links from search engines anyway.
+- **`admin_frontend`** — the Super Admin panel.  GoTrue has a
+  built-in admin user; for routine workspace use it isn't needed.
+- **SMTP** — magic-link / password-reset emails are disabled
+  (`GOTRUE_MAILER_AUTOCONFIRM=true`).  The owner signs in through
+  the OIDC bridge, not via password reset, so there's nothing to
+  email.
 
-Model itself on `openhost-lemmy`:
+## SSO flow
 
-  1. `Dockerfile` based on `debian:bookworm-slim` with apt-installed
-     postgres-15 + redis + nginx + python3 + gotrue + minio + the
-     appflowy-cloud / appflowy-history / appflowy-worker binaries
-     copied from their respective upstream images via multi-stage
-     COPY.
-  2. `start.sh` that:
-     * Initialises the Postgres data dir on first boot.
-     * Generates a strong GoTrue JWT secret + OIDC client secret.
-     * Bootstraps GoTrue's `auth` schema via `goose migrate` or
-       similar.
-     * INSERTs an OIDC provider row pointing at `https://<zone>/_oidc/*`.
-     * Starts MinIO with a generated access key / secret.
-     * Starts appflowy-cloud, appflowy-history, appflowy-worker
-       with the right `DATABASE_URL` / `REDIS_URL` /
-       `S3_*` / `GOTRUE_*` env vars.
-     * Starts nginx + the OIDC bridge sidecar (lifted from
-       `openhost-lemmy`/`oidc_bridge.py`).
-  3. An `oidc_bridge.py` near-verbatim from `openhost-lemmy`.
-  4. A `bootstrap.py` that, after services are up, calls
-     `appflowy-cloud`'s `POST /api/user/register` with the OIDC
-     bridge's owner email so the user row exists before first
-     OIDC sign-in (otherwise GoTrue's first-sign-in path needs
-     a working SMTP relay for confirmation emails).
-  5. An `nginx.conf` that routes `/_oidc/*` to the bridge,
-     `/gotrue/*` to GoTrue, `/api/*` to appflowy-cloud, `/minio/*`
-     to MinIO, and everything else to the appflowy-cloud SPA.
+1. Owner navigates to `https://appflowy.<zone>/`.
+2. nginx sees `X-OpenHost-Is-Owner: true`, no GoTrue session, and
+   an `Accept: text/html` request → rewrites to `/sso-bounce`.
+3. `sso_bounce.py` 302s to `/gotrue/authorize?provider=keycloak`.
+4. GoTrue 302s to the OIDC bridge's
+   `/realms/openhost/protocol/openid-connect/auth` (still on the
+   same hostname, internally proxied to `oidc_bridge.py`).
+5. The bridge sees `X-OpenHost-Is-Owner: true` and 302s back to
+   GoTrue's `/gotrue/callback?code=...&state=...` with an
+   authorization code.
+6. GoTrue exchanges the code at the bridge's `/token`, validates
+   the ID token's signature against `/jwks_uri`, and mints a
+   GoTrue session JWT.
+7. The browser lands on the SPA with a `sb-<project>-auth-token`
+   in localStorage; subsequent /api/ and /ws calls authenticate
+   with the GoTrue JWT.
 
-The complete implementation is roughly 600 lines of
-configuration + scripts.  It's a 1-day task; not a 1-hour task.
+## Files
 
-## Status
+| File              | Purpose                                                    |
+| ----------------- | ---------------------------------------------------------- |
+| `openhost.toml`   | OpenHost manifest                                          |
+| `Dockerfile`      | Multi-stage: copies binaries from appflowy_cloud, gotrue, appflowy_web upstream images onto Ubuntu 24.04 |
+| `start.sh`        | Boots all internal services in order; supervises via `wait -n` |
+| `nginx.conf`      | Front-door router (proxies /api, /gotrue, /ws, /minio-api, etc.) |
+| `oidc_bridge.py`  | OIDC IdP — both flat /_oidc/* and Keycloak-shape paths     |
+| `sso_bounce.py`   | Owner SSO redirect helper                                   |
+| `bootstrap.py`    | First-boot health checks (currently no-op)                  |
 
-Tracking issue: pull requests welcome.  Until then, point your
-clients at a separately-deployed AppFlowy Cloud or use AppFlowy's
-local-only mode.
+## Adding AI features later
+
+If you want to re-enable AI:
+
+1. Add `appflowy-ai-source` as a multi-stage source in the
+   Dockerfile and copy `/app/main.py` plus the python venv it
+   needs.
+2. Update `start.sh` to launch the AI service on `127.0.0.1:5001`
+   with the OpenAI key from a generated secret file (or pulled
+   from the openhost-secrets-v2 service).
+3. Set `AI_ENABLED=true` and `AI_SERVER_HOST=127.0.0.1` in the
+   appflowy_cloud env block.
+4. Bump `[resources] memory_mb` to 2048 — the AI service is a
+   large Python process with embeddings models loaded.
