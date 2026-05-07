@@ -1,0 +1,22 @@
+[app]
+name = "appflowy"
+version = "0.1.0"
+description = "Placeholder for AppFlowy Cloud (Notion-alternative collaborative workspace).  Full deployment requires postgres + gotrue + appflowy-cloud + appflowy-history + appflowy-worker + nginx + minio (S3-compatible blob store) + redis — too complex to ship in a single OpenHost container in this iteration.  This placeholder serves a static page explaining the situation."
+authors = ["Andrew Laack <andrew@laack.co>"]
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+# Busybox httpd serves /var/www; a GET / returns the placeholder
+# HTML with status 200, which OpenHost's healthcheck accepts.
+health_check = "/"
+
+[resources]
+memory_mb = 64
+cpu_millicores = 100
+
+[data]
+app_data = false
+app_temp_data = false
