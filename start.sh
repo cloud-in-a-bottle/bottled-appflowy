@@ -241,10 +241,21 @@ done
 GOTRUE_DB_URL="postgres://postgres:${PG_PASSWORD}@127.0.0.1:5432/postgres?search_path=auth&sslmode=disable"
 
 echo "[start.sh] Running gotrue migrations"
+# `gotrue migrate` requires the same set of env vars as the main
+# server even though most are unused — API_EXTERNAL_URL,
+# GOTRUE_JWT_SECRET, GOTRUE_SITE_URL all have to be present or
+# config validation fails.  Pass the full prod env so the same
+# values flow through.
 GOTRUE_DB_DRIVER=postgres \
 GOTRUE_DATABASE_URL="$GOTRUE_DB_URL" \
 DATABASE_URL="$GOTRUE_DB_URL" \
 GOTRUE_MIGRATIONS_PATH=/opt/openhost-appflowy/gotrue-migrations \
+GOTRUE_API_HOST=127.0.0.1 \
+GOTRUE_API_PORT=9999 \
+PORT=9999 \
+GOTRUE_SITE_URL="appflowy-flutter://" \
+API_EXTERNAL_URL="${APP_BASE_URL}/gotrue" \
+GOTRUE_JWT_SECRET="$GOTRUE_JWT_SECRET" \
 gosu appflowy /usr/local/bin/gotrue migrate \
     2>&1 | sed 's/^/[gotrue-migrate] /' || true
 
