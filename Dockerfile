@@ -146,6 +146,7 @@ COPY oidc_bridge.py   /opt/openhost-appflowy/oidc_bridge.py
 COPY sso_bounce.py    /opt/openhost-appflowy/sso_bounce.py
 COPY bootstrap.py     /opt/openhost-appflowy/bootstrap.py
 COPY start.sh         /opt/openhost-appflowy/start.sh
+RUN chmod +x /opt/openhost-appflowy/start.sh
 
 EXPOSE 8080
 
