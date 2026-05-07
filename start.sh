@@ -393,6 +393,43 @@ if [[ "$APPFLOWY_READY" != "1" ]]; then
 fi
 
 # -----------------------------------------------------------------
+# AppFlowy Worker
+# -----------------------------------------------------------------
+#
+# Background job runner for Notion-zip imports (and a few other
+# long-running tasks).  appflowy_cloud queues each import on the
+# ``import_task_stream`` Redis stream; the worker polls the stream,
+# downloads the user's zip from MinIO, parses the Notion export,
+# and materialises the pages in the workspace.  Without this
+# process running, the visitor sees the "we'll notify you when
+# it's done" toast and the import sits in the queue forever.
+#
+# Same DB / Redis / S3 settings as appflowy_cloud — the worker
+# shares the same backing services and just consumes a different
+# Redis stream.  We launch it AFTER appflowy_cloud's readiness
+# check so we know the DB schema migrations have completed.
+
+echo "[start.sh] Starting appflowy_worker"
+APP_ENVIRONMENT=production \
+RUST_LOG=warn \
+APPFLOWY_ENVIRONMENT=production \
+APPFLOWY_WORKER_REDIS_URL="redis://127.0.0.1:6379" \
+APPFLOWY_WORKER_ENVIRONMENT=production \
+APPFLOWY_WORKER_DATABASE_URL="$APPFLOWY_DB_URL" \
+APPFLOWY_WORKER_DATABASE_NAME=postgres \
+APPFLOWY_WORKER_IMPORT_TICK_INTERVAL=30 \
+APPFLOWY_S3_USE_MINIO=true \
+APPFLOWY_S3_MINIO_URL="http://127.0.0.1:9000" \
+APPFLOWY_S3_ACCESS_KEY="$MINIO_ACCESS_KEY" \
+APPFLOWY_S3_SECRET_KEY="$MINIO_SECRET_KEY" \
+APPFLOWY_S3_BUCKET=appflowy \
+APPFLOWY_S3_REGION=us-east-1 \
+APPFLOWY_S3_PRESIGNED_URL_ENDPOINT="${APP_BASE_URL}/minio-api" \
+gosu appflowy /usr/local/bin/appflowy_worker \
+    > "$PERSIST/log/appflowy_worker.log" 2>&1 &
+WORKER_PID=$!
+
+# -----------------------------------------------------------------
 # OIDC bridge + SSO bouncer
 # -----------------------------------------------------------------
 
@@ -444,12 +481,17 @@ NGINX_PID=$!
 
 cleanup() {
     echo "[start.sh] Cleaning up child processes..."
-    kill -TERM "$NGINX_PID" "$APPFLOWY_PID" "$GOTRUE_PID" "$BRIDGE_PID" "$BOUNCE_PID" "$REDIS_PID" "$MINIO_PID" 2>/dev/null || true
+    kill -TERM "$NGINX_PID" "$APPFLOWY_PID" "$WORKER_PID" "$GOTRUE_PID" "$BRIDGE_PID" "$BOUNCE_PID" "$REDIS_PID" "$MINIO_PID" 2>/dev/null || true
     gosu postgres "$PG_BIN/pg_ctl" -D "$PG_DATA" stop -m fast 2>/dev/null || true
     wait 2>/dev/null || true
 }
 trap cleanup TERM INT
 
+# Note: the worker is intentionally NOT in the wait-n list. If the
+# worker crashes (e.g. on a malformed import zip) we don't want to
+# bring down the whole stack with it; let the next boot pick up
+# the failure log.  appflowy_cloud + nginx + gotrue are critical
+# and stay in the wait set.
 set +e
 wait -n "$NGINX_PID" "$APPFLOWY_PID" "$GOTRUE_PID" "$BRIDGE_PID" "$BOUNCE_PID" "$REDIS_PID" "$MINIO_PID"
 EXIT_CODE=$?

@@ -42,6 +42,14 @@
 # Stage 1: appflowy_cloud (binary + libs from upstream Ubuntu 24.04 image).
 FROM appflowyinc/appflowy_cloud:latest AS appflowy-cloud-source
 
+# Stage 1b: appflowy_worker (background-job runner that processes
+# Notion .zip imports + a few other long-running tasks the
+# main appflowy_cloud server hands off via Redis streams).
+# Without this the import_task_stream fills up with pending jobs
+# and the visitor sees the "we'll notify you" toast forever — no
+# notebook ever materialises.
+FROM appflowyinc/appflowy_worker:latest AS appflowy-worker-source
+
 # Stage 2: gotrue (Go static binary from upstream Alpine image; runs
 # fine on glibc since CGO_ENABLED=0).  We grab the migrations dir
 # from this image too — the binary applies them on `auth migrate`.
@@ -126,8 +134,11 @@ RUN curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/archive/minio.
 COPY --from=gotrue-source /auth /usr/local/bin/gotrue
 COPY --from=gotrue-source /migrations /opt/openhost-appflowy/gotrue-migrations
 
-# Copy appflowy_cloud binary from the upstream noble image.
+# Copy appflowy_cloud + appflowy_worker binaries from the upstream
+# noble images.  Both are dynamically-linked Rust binaries and need
+# the same libssl / libbz2 base image we're already using.
 COPY --from=appflowy-cloud-source /usr/local/bin/appflowy_cloud /usr/local/bin/appflowy_cloud
+COPY --from=appflowy-worker-source /usr/local/bin/appflowy_worker /usr/local/bin/appflowy_worker
 
 # Copy the AppFlowy-Web static SPA bundle.  We serve this from
 # nginx without the Bun-based SSR layer; the SPA does its own
