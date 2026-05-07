@@ -219,12 +219,20 @@ gosu postgres "$PG_BIN/psql" -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";' -d
 
 echo "[start.sh] Starting Redis on 127.0.0.1:6379"
 chown -R appflowy:appflowy "$REDIS_DATA"
+# Persistence: AOF on with everysec fsync + RDB snapshot every 5
+# minutes if at least one key changed.  AppFlowy uses Redis for
+# the import_task_stream queue (Notion zip imports etc.) — without
+# persistence, an unfinished import gets dropped on container
+# restart and the visitor's "we'll notify you" toast never resolves.
+# everysec is the standard durability/perf trade-off; we lose at
+# most 1s of writes on a hard crash.
 gosu appflowy redis-server \
     --bind 127.0.0.1 \
     --port 6379 \
     --dir "$REDIS_DATA" \
-    --save "" \
-    --appendonly no \
+    --save "300 1" \
+    --appendonly yes \
+    --appendfsync everysec \
     --daemonize no \
     --logfile "" \
     > "$PERSIST/log/redis.log" 2>&1 &
