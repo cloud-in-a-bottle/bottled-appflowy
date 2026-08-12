@@ -1,15 +1,15 @@
-# openhost-appflowy
+# bottled-appflowy
 
 [AppFlowy Cloud](https://github.com/AppFlowy-IO/AppFlowy-Cloud) — a
-Notion-alternative collaborative workspace — packaged as an OpenHost
+Notion-alternative collaborative workspace — packaged as a Cloud in a Bottle
 app, accessed via SSO with no application-level auth on the public
 SPA.
 
 ## What you get
 
 - AppFlowy running on `https://appflowy.<zone>/` with TLS terminated
-  by the OpenHost outer Caddy.
-- Only the zone owner can reach the SPA; the OpenHost router gates
+  by the Cloud in a Bottle outer Caddy.
+- Only the zone owner can reach the SPA; the Cloud in a Bottle router gates
   access on zone JWTs and the OIDC bridge enforces "owner only" by
   rejecting any /authorize request without `X-OpenHost-Is-Owner`.
 - The AppFlowy desktop / mobile native apps can connect to
@@ -112,7 +112,7 @@ Internal services (started by `start.sh`, supervised via bash
 
 | File              | Purpose                                                    |
 | ----------------- | ---------------------------------------------------------- |
-| `openhost.toml`   | OpenHost manifest                                          |
+| `openhost.toml`   | Cloud in a Bottle manifest                                          |
 | `Dockerfile`      | Multi-stage: copies binaries from appflowy_cloud, gotrue, appflowy_web upstream images onto Ubuntu 24.04 |
 | `start.sh`        | Boots all internal services in order; supervises via `wait -n` |
 | `nginx.conf`      | Front-door router (proxies /api, /gotrue, /ws, /minio-api, etc.) |
