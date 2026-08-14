@@ -1,7 +1,7 @@
 [app]
 name = "appflowy"
 version = "0.2.0"
-description = "AppFlowy Cloud (Notion-alternative collaborative workspace) — bundles postgres+pgvector, redis, gotrue, appflowy_cloud, minio, OIDC bridge, and nginx in a single OpenHost container.  AI features and the Bun-based SSR layer are intentionally omitted in this build; the SPA loads via static files served by nginx."
+description = "AppFlowy Cloud (Notion-alternative collaborative workspace) — bundles postgres+pgvector, redis, gotrue, appflowy_cloud, minio, OIDC bridge, and nginx in a single Cloud in a Bottle container.  AI features and the Bun-based SSR layer are intentionally omitted in this build; the SPA loads via static files served by nginx."
 authors = ["Andrew Laack <andrew@laack.co>"]
 
 [runtime.container]
